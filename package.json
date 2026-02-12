@@ -1,0 +1,39 @@
+{
+  "name": "ssi-healthcare-blockchain",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Blockchain-enabled SSI system for healthcare billing",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "demo": "node index.js --demo"
+  },
+  "dependencies": {
+    "@veramo/core": "^5.5.3",
+    "@veramo/credential-w3c": "^5.5.3",
+    "@veramo/data-store": "^5.5.3",
+    "@veramo/did-manager": "^5.5.3",
+    "@veramo/did-provider-key": "^5.5.3",
+    "@veramo/did-resolver": "^5.5.3",
+    "@veramo/key-manager": "^5.5.3",
+    "@veramo/kms-local": "^5.5.3",
+    "chalk": "^5.3.0",
+    "cli-table3": "^0.6.3",
+    "did-resolver": "^4.1.0",
+    "dotenv": "^17.2.4",
+    "ethers": "^6.9.0",
+    "ethr-did-resolver": "^10.1.4",
+    "inquirer": "^9.2.12",
+    "key-did-resolver": "^2.2.0",
+    "sqlite3": "^5.1.6",
+    "typeorm": "^0.3.17",
+    "web-did-resolver": "^2.0.27"
+  },
+  "keywords": [
+    "ssi",
+    "healthcare",
+    "blockchain",
+    "verifiable-credentials",
+    "did"
+  ]
+}

@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Data and wallets (NEVER commit private keys!)
+data/
+*.db
+*.sqlite
+
+# Hardhat
+cache/
+artifacts/
+typechain/
+typechain-types/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Build outputs
+dist/
+build/
+out/
+
+# Coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Blockchain specific
+.openzeppelin/
+deployments/
+
+# Master encryption key (CRITICAL - NEVER commit!)
+.master.key
