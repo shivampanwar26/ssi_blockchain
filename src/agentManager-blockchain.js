@@ -12,6 +12,12 @@ import {
   CREDENTIAL_SCHEMAS
 } from './agentConfig-blockchain.js';
 import { BlockchainManager } from './blockchainConfig.js';
+import { ZKPManager } from './zkpManager.js';
+import {
+  dashboardStats, agentTable, credentialTable,
+  zkProofTable, verificationResult, txReceipt,
+  blockchainStatusBar, infoBox, Table
+} from '../tableUtils.js';
 
 export class AgentManager {
   constructor(enableBlockchain = true, network = 'sepolia') {
@@ -21,6 +27,7 @@ export class AgentManager {
     this.enableBlockchain = enableBlockchain;
     this.network = network;
     this.blockchain = null;
+    this.zkp = null;
   }
 
   // ======================================================
@@ -33,10 +40,22 @@ export class AgentManager {
     try {
       this.blockchain = new BlockchainManager(this.network);
       await this.blockchain.initialize();
+      
+      // Initialize funder wallet for agent onboarding
+      await this.blockchain.initializeFunder();
+      
       console.log(chalk.green(`✅ Blockchain initialized on ${this.network}\n`));
     } catch (error) {
       console.log(chalk.yellow(`⚠️  Blockchain unavailable: ${error.message}\n`));
       this.enableBlockchain = false;
+    }
+
+    // Initialize ZKP module
+    try {
+      this.zkp = new ZKPManager();
+      await this.zkp.initialize();
+    } catch (error) {
+      console.log(chalk.yellow(`⚠️  ZKP module failed: ${error.message}\n`));
     }
   }
 
@@ -155,6 +174,28 @@ export class AgentManager {
         if (this.blockchain?.provider) {
           ethWallet = ethWallet.connect(this.blockchain.provider);
         }
+
+        // Check DID ownership on-chain: the DID should be owned by THIS agent's wallet.
+        // If it was registered by the funder wallet in a previous version, warn the user.
+        if (this.blockchain?.contract && did) {
+          try {
+            const didInfo = await this.blockchain.contract.getDIDInfo(did);
+            if (didInfo[0]) { // DID exists on-chain
+              const onChainOwner = didInfo[1].toLowerCase();
+              const agentWallet = address.toLowerCase();
+              
+              if (onChainOwner !== agentWallet) {
+                console.log(chalk.yellow(`  ⚠️  DID ownership mismatch for ${name}:`));
+                console.log(chalk.yellow(`     On-chain owner: ${didInfo[1]}`));
+                console.log(chalk.yellow(`     Agent wallet:   ${address}`));
+                console.log(chalk.yellow(`     This agent cannot issue credentials on-chain.`));
+                console.log(chalk.yellow(`     Fix: Delete this agent, recreate it, or redeploy the contract.`));
+              }
+            }
+          } catch {
+            // Non-critical — just a check
+          }
+        }
       } catch (error) {
         console.log(chalk.yellow(`⚠️  Could not load blockchain wallet for ${name}`));
       }
@@ -226,27 +267,62 @@ export class AgentManager {
           ethWallet = ethWallet.connect(this.blockchain.provider);
         }
         
-        // 🔧 FIX #1: Register DID on blockchain immediately
+        // ── DID Registration Flow ──
+        // IMPORTANT: The smart contract maps DID → msg.sender as owner.
+        // When issuing credentials, the contract checks that the caller
+        // is the DID owner. So the agent MUST register its own DID using
+        // its OWN wallet — not the funder wallet.
+        //
+        // Flow:
+        //   1. Funder sends ETH to agent wallet (so it can pay gas)
+        //   2. Agent registers its own DID with its own wallet
+        //   3. Contract records: DID owner = agent's wallet address
+        //   4. Later, agent can call issueCredential() successfully
+        //
         if (this.blockchain?.contract) {
           try {
-            console.log(chalk.gray('  Registering DID on blockchain...'));
-            
-            // Check wallet balance first
+            // Step 1: Fund the agent wallet using funder
+            if (this.blockchain?.funderWallet) {
+              try {
+                console.log(chalk.gray('  Funding agent wallet from funder...'));
+                const fundResult = await this.blockchain.fundAgentWallet(blockchainAddress);
+                if (fundResult.success && !fundResult.skipped) {
+                  console.log(chalk.green(`  ✅ Agent funded: ${fundResult.amount} ETH`));
+                  console.log(chalk.gray(`     TX: ${fundResult.transactionHash.substring(0, 20)}...`));
+                } else if (fundResult.skipped) {
+                  console.log(chalk.gray(`  ℹ️  ${fundResult.reason}`));
+                }
+              } catch (fundError) {
+                console.log(chalk.yellow(`  ⚠️  Funding skipped: ${fundError.message}`));
+              }
+            }
+
+            // Step 2: Agent registers its own DID with its own wallet
+            // Check if agent now has enough ETH (either from funder or pre-existing)
             const balance = await this.blockchain.getBalance(blockchainAddress);
-            if (parseFloat(balance.ether) < 0.001) {
-              console.log(chalk.yellow(`  ⚠️  Low balance (${balance.ether} ETH). Fund at https://sepoliafaucet.com/`));
-              console.log(chalk.yellow(`     Address: ${blockchainAddress}`));
-            } else {
+            if (parseFloat(balance.ether) >= 0.0005) {
+              console.log(chalk.gray('  Registering DID on blockchain (agent wallet)...'));
               const result = await this.blockchain.registerDID(identifier.did, ethWallet);
-              if (result.success) {
-                console.log(chalk.green(`  ✅ DID registered (tx: ${result.transactionHash.substring(0, 10)}...)`));
+              
+              if (result.success && !result.alreadyRegistered) {
+                console.log(chalk.green(`  ✅ DID registered on-chain (tx: ${result.transactionHash.substring(0, 10)}...)`));
+                console.log(chalk.gray(`     DID owner: ${blockchainAddress}`));
                 metadata.didRegistrationTx = result.transactionHash;
                 metadata.didRegisteredAt = new Date().toISOString();
+                metadata.didOwnerWallet = blockchainAddress;
+              } else if (result.alreadyRegistered) {
+                console.log(chalk.gray('  ℹ️  DID already registered on-chain'));
+              }
+            } else {
+              console.log(chalk.yellow(`  ⚠️  Agent has ${balance.ether} ETH — not enough for DID registration.`));
+              if (!this.blockchain?.funderWallet) {
+                console.log(chalk.yellow(`     Fund funder wallet or agent at https://sepoliafaucet.com/`));
+                console.log(chalk.yellow(`     Agent address: ${blockchainAddress}`));
               }
             }
           } catch (error) {
             console.log(chalk.yellow(`  ⚠️  DID registration failed: ${error.message}`));
-            // Continue anyway - can register later
+            // Continue — can register later
           }
         }
       } catch (error) {
@@ -467,16 +543,32 @@ export class AgentManager {
       blockchainTxHash: null
     };
 
-    // 🔧 FIX #3: Verify DIDs are registered before issuing credential
+    // Verify DIDs are registered before issuing credential
+    // IMPORTANT: Each agent must register its own DID with its own wallet
+    // so the contract maps DID ownership to that wallet address.
     if (this.enableBlockchain && this.blockchain?.contract) {
       try {
         // Check if issuer DID is registered
         const issuerInfo = await this.blockchain.contract.getDIDInfo(issuer.did);
-        if (!issuerInfo[0]) { // exists is the first return value
+        if (!issuerInfo[0]) {
           console.log(chalk.yellow('  ⚠️  Issuer DID not registered, registering now...'));
-          const result = await this.blockchain.registerDID(issuer.did, issuer.ethWallet);
+          
+          // Ensure issuer wallet has ETH
+          let issuerWalletForReg = issuer.ethWallet;
+          if (!issuerWalletForReg || !issuerWalletForReg.provider) {
+            issuerWalletForReg = await this.blockchain.getOrCreateWallet(issuer.id);
+          }
+          
+          // Fund issuer if needed
+          if (this.blockchain.funderWallet) {
+            try {
+              await this.blockchain.fundAgentWallet(issuer.blockchainAddress);
+            } catch { /* non-critical */ }
+          }
+          
+          const result = await this.blockchain.registerDID(issuer.did, issuerWalletForReg);
           if (result.success) {
-            console.log(chalk.green(`  ✅ Issuer DID registered (tx: ${result.transactionHash.substring(0, 10)}...)`));
+            console.log(chalk.green(`  ✅ Issuer DID registered (tx: ${result.transactionHash?.substring(0, 10)}...)`));
           }
         }
 
@@ -484,14 +576,22 @@ export class AgentManager {
         const subjectInfo = await this.blockchain.contract.getDIDInfo(subject.did);
         if (!subjectInfo[0]) {
           console.log(chalk.yellow('  ⚠️  Subject DID not registered, registering now...'));
-          // Get subject's wallet
+          
           let subjectWallet = subject.ethWallet;
           if (!subjectWallet || !subjectWallet.provider) {
             subjectWallet = await this.blockchain.getOrCreateWallet(subject.id);
           }
+          
+          // Fund subject if needed
+          if (this.blockchain.funderWallet) {
+            try {
+              await this.blockchain.fundAgentWallet(subject.blockchainAddress);
+            } catch { /* non-critical */ }
+          }
+          
           const result = await this.blockchain.registerDID(subject.did, subjectWallet);
           if (result.success) {
-            console.log(chalk.green(`  ✅ Subject DID registered (tx: ${result.transactionHash.substring(0, 10)}...)`));
+            console.log(chalk.green(`  ✅ Subject DID registered (tx: ${result.transactionHash?.substring(0, 10)}...)`));
           }
         }
       } catch (error) {
@@ -503,6 +603,7 @@ export class AgentManager {
     if (this.enableBlockchain && this.blockchain?.contract) {
       try {
         console.log(chalk.gray('  Storing credential on blockchain...'));
+        console.log(chalk.gray(`  Method: SSIRegistry.storeCredential(bytes32, string, string, string)`));
         
         // Ensure issuer wallet is connected
         let issuerWallet = issuer.ethWallet;
@@ -523,6 +624,10 @@ export class AgentManager {
           credentialRecord.blockchainHash = result.credentialHash;
           credentialRecord.blockNumber = result.blockNumber;
           console.log(chalk.green(`  ✅ Blockchain TX: ${result.transactionHash.substring(0, 20)}...`));
+          console.log(chalk.gray(`     Block: ${result.blockNumber} | Gas: ${result.gasUsed || 'N/A'}`));
+          console.log(chalk.gray(`     Credential Hash: ${result.credentialHash.substring(0, 24)}...`));
+          console.log(chalk.gray(`     Issuer DID: ${issuer.did.substring(0, 36)}...`));
+          console.log(chalk.gray(`     Subject DID: ${subject.did.substring(0, 36)}...`));
           
           // Add explorer link
           const explorerUrl = this.blockchain.getExplorerUrl('tx', result.transactionHash);
@@ -689,6 +794,303 @@ export class AgentManager {
     }
 
     return await this.blockchain.getBalance(agent.blockchainAddress);
+  }
+
+  // ======================================================
+  // ZKP: GENERATE PROOF (Patient generates locally)
+  // ======================================================
+  
+  /**
+   * Patient generates a ZK proof from a credential in their wallet.
+   * Matches sequence diagram: Step 6 - "computes and creates ZK proof locally"
+   * 
+   * @param {string} proverId        - Patient agent ID
+   * @param {string} credentialId    - ID of the credential in patient's wallet
+   * @param {string[]} disclosedFields - Fields the patient CHOOSES to reveal
+   * @returns {Object} zkProof
+   */
+  async generateZKProof(proverId, credentialId, disclosedFields) {
+    if (!this.zkp) {
+      throw new Error('ZKP module not initialized');
+    }
+
+    const prover = this.getAgent(proverId);
+    if (!prover) {
+      throw new Error('Prover agent not found');
+    }
+
+    // Find the credential in the prover's wallet
+    const credRecord = prover.credentials.find(c => c.id === credentialId);
+    if (!credRecord) {
+      throw new Error('Credential not found in wallet');
+    }
+
+    const proverType = AGENT_TYPES[prover.type];
+    console.log(`\n${proverType.icon} ${chalk.green(prover.name)} generating ZK proof...`);
+    console.log(chalk.gray(`   Credential: ${credRecord.type} (from ${credRecord.issuer})`));
+
+    // Generate the proof
+    const zkProof = await this.zkp.generateProof(
+      credRecord.credential,
+      credRecord,
+      disclosedFields,
+      prover
+    );
+
+    // Save proof to prover's wallet
+    await this.zkp.saveProof(proverId, zkProof);
+
+    // Log proof audit trail locally
+    // NOTE: We do NOT call issueCredential on-chain here because the smart
+    // contract requires the issuer's wallet to sign — a patient cannot issue
+    // for a hospital's DID. The original credential is already on-chain;
+    // the verifier checks that during proof verification (step 8-9).
+    await this.zkp.anchorProofOnChain(zkProof, this.blockchain, null);
+
+    // Display the proof
+    this.zkp.displayProof(zkProof);
+
+    return zkProof;
+  }
+
+  // ======================================================
+  // ZKP: SUBMIT PROOF (Patient → Insurer)
+  // ======================================================
+
+  /**
+   * Patient submits a ZK proof to a verifier (insurer).
+   * Matches sequence diagram: Step 7 - "sends generated ZK proof"
+   */
+  async submitZKProof(proverId, verifierId, proofId) {
+    const prover = this.getAgent(proverId);
+    const verifier = this.getAgent(verifierId);
+    
+    if (!prover || !verifier) {
+      throw new Error('Prover or verifier agent not found');
+    }
+
+    // Load proof from prover's wallet
+    const zkProof = await this.zkp.loadProof(proverId, proofId);
+    if (!zkProof) {
+      throw new Error('Proof not found in wallet');
+    }
+
+    const proverType = AGENT_TYPES[prover.type];
+    const verifierType = AGENT_TYPES[verifier.type];
+    
+    console.log(`\n${proverType.icon} ${chalk.green(prover.name)} → ${verifierType.icon} ${chalk.blue(verifier.name)}`);
+    console.log(chalk.yellow('Submitting ZK Proof...'));
+
+    // Save proof to verifier's wallet (received proofs directory)
+    const receivedDir = `./data/wallets/${verifierId}/received-proofs`;
+    await fs.mkdir(receivedDir, { recursive: true });
+    
+    const submission = {
+      ...zkProof,
+      submittedBy: proverId,
+      submittedByDid: prover.did,
+      submittedAt: new Date().toISOString(),
+    };
+    
+    await fs.writeFile(
+      path.join(receivedDir, `${zkProof.id}.json`),
+      JSON.stringify(submission, null, 2)
+    );
+
+    console.log(chalk.green('✅ Proof submitted successfully\n'));
+    return submission;
+  }
+
+  // ======================================================
+  // ZKP: VERIFY PROOF (Insurer verifies)
+  // ======================================================
+
+  /**
+   * Verifier (insurer) verifies a received ZK proof.
+   * Matches sequence diagram: Steps 8-9
+   *   Step 8: "Verify Hospital ID" on blockchain
+   *   Step 9: "verifies mathematical proof locally"
+   */
+  async verifyZKProof(verifierId, proofId) {
+    if (!this.zkp) {
+      throw new Error('ZKP module not initialized');
+    }
+
+    const verifier = this.getAgent(verifierId);
+    if (!verifier) {
+      throw new Error('Verifier agent not found');
+    }
+
+    // Load proof from verifier's received-proofs directory
+    const receivedDir = `./data/wallets/${verifierId}/received-proofs`;
+    let zkProof;
+    
+    try {
+      const content = await fs.readFile(path.join(receivedDir, `${proofId}.json`), 'utf-8');
+      zkProof = JSON.parse(content);
+    } catch {
+      // Also check prover's wallet (for direct verification flow)
+      zkProof = await this.zkp.loadProof(verifierId, proofId);
+    }
+
+    if (!zkProof) {
+      throw new Error('Proof not found');
+    }
+
+    const verifierType = AGENT_TYPES[verifier.type];
+    console.log(`\n${verifierType.icon} ${chalk.blue(verifier.name)} verifying ZK proof...`);
+
+    // Run full verification (includes blockchain DID check)
+    const result = await this.zkp.verifyProof(
+      zkProof,
+      verifier,
+      this.enableBlockchain ? this.blockchain : null
+    );
+
+    // Update the proof with verification result
+    zkProof.verified = result.valid;
+    zkProof.verifiedBy = verifier.did;
+    zkProof.verifiedByName = verifier.name;
+    zkProof.verifiedAt = result.verifiedAt;
+
+    // Save updated proof to verifier's received-proofs
+    try {
+      await fs.writeFile(
+        path.join(receivedDir, `${proofId}.json`),
+        JSON.stringify(zkProof, null, 2)
+      );
+    } catch {
+      // Not critical
+    }
+
+    // Also update the proof in the PATIENT's wallet so their status refreshes
+    if (zkProof.submittedBy) {
+      try {
+        const proverProofPath = `./data/wallets/${zkProof.submittedBy}/proofs/${proofId}.json`;
+        const proverContent = await fs.readFile(proverProofPath, 'utf-8');
+        const proverProof = JSON.parse(proverContent);
+        
+        proverProof.verified = result.valid;
+        proverProof.verifiedBy = verifier.did;
+        proverProof.verifiedByName = verifier.name;
+        proverProof.verifiedAt = result.verifiedAt;
+        
+        await fs.writeFile(proverProofPath, JSON.stringify(proverProof, null, 2));
+        console.log(chalk.gray(`   📋 Patient proof status updated`));
+      } catch {
+        // Patient proof file might not exist at that path — not critical
+      }
+    } else {
+      // Fallback: try to find the prover by scanning the proof's generatedBy DID
+      try {
+        const agents = this.listAgents();
+        const prover = agents.find(a => a.did === zkProof.generatedBy);
+        if (prover) {
+          const proverProofPath = `./data/wallets/${prover.id}/proofs/${proofId}.json`;
+          const proverContent = await fs.readFile(proverProofPath, 'utf-8');
+          const proverProof = JSON.parse(proverContent);
+          
+          proverProof.verified = result.valid;
+          proverProof.verifiedBy = verifier.did;
+          proverProof.verifiedByName = verifier.name;
+          proverProof.verifiedAt = result.verifiedAt;
+          
+          await fs.writeFile(proverProofPath, JSON.stringify(proverProof, null, 2));
+          console.log(chalk.gray(`   📋 Patient proof status updated`));
+        }
+      } catch {
+        // Not critical
+      }
+    }
+
+    // Display result
+    this.zkp.displayVerificationResult(result);
+
+    return result;
+  }
+
+  // ======================================================
+  // ZKP: GENERATE RANGE PROOF
+  // ======================================================
+
+  /**
+   * Generate a range proof for a numeric credential field.
+   * e.g., Prove bill amount > $500 without revealing exact amount.
+   */
+  async generateRangeProof(proverId, credentialId, fieldName, min, max) {
+    if (!this.zkp) {
+      throw new Error('ZKP module not initialized');
+    }
+
+    const prover = this.getAgent(proverId);
+    if (!prover) {
+      throw new Error('Prover agent not found');
+    }
+
+    const credRecord = prover.credentials.find(c => c.id === credentialId);
+    if (!credRecord) {
+      throw new Error('Credential not found');
+    }
+
+    // Extract the numeric value from the credential
+    const claims = credRecord.credential?.credentialSubject || {};
+    const rawValue = claims[fieldName];
+    
+    if (rawValue === undefined) {
+      throw new Error(`Field "${fieldName}" not found in credential`);
+    }
+
+    const numericValue = parseFloat(rawValue.toString().replace(/[^0-9.]/g, ''));
+    if (isNaN(numericValue)) {
+      throw new Error(`Field "${fieldName}" is not numeric`);
+    }
+
+    console.log(`\n${AGENT_TYPES[prover.type].icon} ${chalk.green(prover.name)} generating range proof...`);
+    
+    const rangeProof = this.zkp.generateRangeProof(numericValue, min, max, fieldName);
+    
+    // Save range proof
+    const proofRecord = {
+      id: crypto.randomBytes(16).toString('hex'),
+      type: 'range',
+      credentialId,
+      ...rangeProof,
+      generatedAt: new Date().toISOString(),
+    };
+    
+    await this.zkp.saveProof(proverId, proofRecord);
+    
+    return proofRecord;
+  }
+
+  // ======================================================
+  // ZKP: LIST PROOFS FOR AGENT
+  // ======================================================
+
+  async listZKProofs(agentId) {
+    if (!this.zkp) return [];
+    return await this.zkp.listProofs(agentId);
+  }
+
+  // ======================================================
+  // ZKP: LIST RECEIVED PROOFS (for verifier)
+  // ======================================================
+
+  async listReceivedProofs(agentId) {
+    const receivedDir = `./data/wallets/${agentId}/received-proofs`;
+    try {
+      const files = await fs.readdir(receivedDir);
+      const proofs = [];
+      for (const file of files) {
+        if (file.endsWith('.json')) {
+          const content = await fs.readFile(path.join(receivedDir, file), 'utf-8');
+          proofs.push(JSON.parse(content));
+        }
+      }
+      return proofs;
+    } catch {
+      return [];
+    }
   }
 
   // ======================================================

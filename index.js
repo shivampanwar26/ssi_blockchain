@@ -4,6 +4,8 @@ import fs from 'fs/promises';
 import inquirer from 'inquirer';
 import { AGENT_TYPES, CREDENTIAL_SCHEMAS } from './src/agentConfig-blockchain.js';
 import { AgentManager } from './src/agentManager-blockchain.js';
+import { addZKPMenuItems, handleZKPAction } from './src/zkpMenu.js';
+
 
 const agentManager = new AgentManager(true, process.env.BLOCKCHAIN_NETWORK || 'sepolia');
 
@@ -11,7 +13,7 @@ const agentManager = new AgentManager(true, process.env.BLOCKCHAIN_NETWORK || 's
 function displayBanner() {
   console.clear();
   console.log(chalk.cyan.bold('╔═══════════════════════════════════════════════════════════╗'));
-  console.log(chalk.cyan.bold('║   SSI HEALTHCARE - BLOCKCHAIN ENABLED BILLING SYSTEM ⛓️  ║'));
+  console.log(chalk.cyan.bold('║   SSI HEALTHCARE - BLOCKCHAIN ENABLED BILLING SYSTEM       ║'));
   console.log(chalk.cyan.bold('╚═══════════════════════════════════════════════════════════╝'));
   console.log('');
 }
@@ -43,26 +45,21 @@ async function mainMenu() {
     { name: '📊  View Statistics', value: 'stats' },
     { name: '🗑️   Delete Agent', value: 'delete' },
     
-    new inquirer.Separator(chalk.cyan('═══ CONNECTIONS ═══')),
-    { name: '🔗  Connect Two Agents', value: 'connect' },
-    { name: '✂️   Disconnect Agents', value: 'disconnect' },
-    
     new inquirer.Separator(chalk.cyan('═══ CREDENTIALS & BILLING ═══')),
     { name: '🏥  Hospital Issues Bill', value: 'issue-bill' },
-    { name: '💳  Insurance Verifies & Pays', value: 'verify-pay' },
-    { name: '📄  Issue Custom Credential', value: 'issue' },
-    { name: '🔍  Verify Credential', value: 'verify' },
+    { name: '??  Insurance Issues Insurance Policy', value: 'issue-policy' },
+    { name: '??  Verify Credential (Issuer-only test)', value: 'verify' },
     { name: '🚫  Revoke Credential', value: 'revoke' },
     { name: '📤  Export Agent Wallet', value: 'export' },
     
+    new inquirer.Separator(chalk.magenta('═══ ZERO-KNOWLEDGE PROOFS ═══')),
+    ...addZKPMenuItems(),
+    
     new inquirer.Separator(chalk.cyan('═══ BLOCKCHAIN ═══')),
-    { name: '⛓️  Deploy Smart Contract', value: 'deploy-contract' },
-    { name: '🔗  Connect to Contract', value: 'connect-contract' },
     { name: '💰  Check Balances', value: 'balances' },
     { name: '📊  Blockchain Info', value: 'blockchain-info' },
     
     new inquirer.Separator(chalk.cyan('═══ SYSTEM ═══')),
-    { name: '🚀  Healthcare Demo', value: 'demo' },
     { name: '🧹  Clean All Data', value: 'clean' },
     { name: '🚪  Exit', value: 'exit' }
   ];
@@ -73,7 +70,8 @@ async function mainMenu() {
       name: 'action',
       message: chalk.bold('What would you like to do?'),
       choices: choices,
-      pageSize: 25
+      pageSize: 25,
+      loop: false
     }
   ]);
 
@@ -243,6 +241,24 @@ async function viewAgentDetails() {
   } else {
     console.log(chalk.gray('No credentials\n'));
   }
+
+  // Show ZK proof count if any
+  try {
+    const proofs = await agentManager.listZKProofs(agent.id);
+    const received = await agentManager.listReceivedProofs(agent.id);
+    if (proofs.length > 0 || received.length > 0) {
+      console.log(chalk.yellow.bold('🔐 Zero-Knowledge Proofs:'));
+      if (proofs.length > 0) {
+        console.log(`  Generated: ${chalk.magenta(proofs.length)} proof(s)`);
+      }
+      if (received.length > 0) {
+        console.log(`  Received:  ${chalk.blue(received.length)} proof(s)`);
+      }
+      console.log('');
+    }
+  } catch {
+    // ZKP module might not be initialized
+  }
 }
 
 // Delete agent
@@ -283,108 +299,6 @@ async function deleteAgent() {
     }
   } else {
     console.log(chalk.gray('Deletion cancelled\n'));
-  }
-}
-
-// Connect two agents
-async function connectAgents() {
-  const agents = agentManager.listAgents();
-
-  if (agents.length < 2) {
-    console.log(chalk.yellow('\n⚠️  Need at least 2 agents to create a connection\n'));
-    return;
-  }
-
-  const agentChoices = agents.map(a => {
-    const agentType = AGENT_TYPES[a.type];
-    const icon = agentType ? agentType.icon : '📦';
-    return {
-      name: `${icon}  ${a.name.padEnd(25)} (${a.type})`,
-      value: a.id,
-      short: a.name
-    };
-  });
-
-  const answers = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'agent1',
-      message: 'Select first agent:',
-      choices: agentChoices,
-      pageSize: 10
-    },
-    {
-      type: 'list',
-      name: 'agent2',
-      message: 'Select second agent:',
-      choices: (answers) => agentChoices.filter(c => c.value !== answers.agent1),
-      pageSize: 10
-    }
-  ]);
-
-  try {
-    await agentManager.connectAgents(answers.agent1, answers.agent2);
-    console.log(chalk.green('\n✅ Agents connected successfully\n'));
-  } catch (error) {
-    console.log(chalk.red(`❌ Error: ${error.message}\n`));
-  }
-}
-
-// Disconnect agents
-async function disconnectAgents() {
-  const agents = agentManager.listAgents();
-  const agentsWithConnections = agents.filter(a => a.connections && a.connections.length > 0);
-
-  if (agentsWithConnections.length === 0) {
-    console.log(chalk.yellow('\n⚠️  No connected agents found\n'));
-    return;
-  }
-
-  const answer1 = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'agentId',
-      message: 'Select agent:',
-      choices: agentsWithConnections.map(a => ({
-        name: `${a.name} (${a.connections.length} connection(s))`,
-        value: a.id
-      }))
-    }
-  ]);
-
-  const agent = agentManager.getAgent(answer1.agentId);
-  const connectionChoices = agent.connections.map(conn => {
-    const otherAgent = agentManager.getAgent(conn.agentId);
-    const displayName = otherAgent ? otherAgent.name : conn.name || conn.agentId;
-    const displayType = otherAgent ? otherAgent.type : conn.type || 'unknown';
-    return {
-      name: `${displayName} (${displayType})`,
-      value: conn.agentId
-    };
-  });
-
-  const answer2 = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'targetId',
-      message: 'Select connection to remove:',
-      choices: connectionChoices
-    },
-    {
-      type: 'confirm',
-      name: 'confirm',
-      message: 'Disconnect these agents?',
-      default: true
-    }
-  ]);
-
-  if (answer2.confirm) {
-    try {
-      await agentManager.disconnectAgents(answer1.agentId, answer2.targetId);
-      console.log(chalk.green('\n✅ Agents disconnected successfully\n'));
-    } catch (error) {
-      console.log(chalk.red(`❌ Error: ${error.message}\n`));
-    }
   }
 }
 
@@ -482,49 +396,31 @@ async function hospitalIssueBill() {
     console.log(chalk.green('\n✅ Medical bill issued successfully!'));
     console.log(chalk.cyan(`Bill Number: ${answers.billNumber}`));
     console.log(chalk.cyan(`Amount: $${parseFloat(answers.amount).toFixed(2)}`));
-    console.log(chalk.gray('Bill stored on blockchain and in patient wallet\n'));
-
-    // Ask if they want to process insurance now
-    const processNow = await inquirer.prompt([
-      {
-        type: 'confirm',
-        name: 'process',
-        message: 'Would you like to process insurance verification now?',
-        default: true
-      }
-    ]);
-
-    if (processNow.process) {
-      await insuranceVerifyAndPay();
-    }
+    console.log(chalk.gray('Bill stored on blockchain and in patient wallet for ZKP presentation\n'));
   } catch (error) {
     console.log(chalk.red(`❌ Error issuing bill: ${error.message}\n`));
   }
 }
 
-// Insurance verifies and pays
-async function insuranceVerifyAndPay() {
+// Insurance company issues insurance policy
+async function insuranceIssuePolicy() {
   const agents = agentManager.listAgents();
   const insurers = agents.filter(a => a.type === 'insurer');
-  const patientsWithBills = agents.filter(a => 
-    a.type === 'patient' && 
-    a.credentials && 
-    a.credentials.some(c => c.type === 'MedicalBill')
-  );
+  const patients = agents.filter(a => a.type === 'patient');
 
   if (insurers.length === 0) {
-    console.log(chalk.yellow('\n⚠️  No insurance companies found\n'));
+    console.log(chalk.yellow('\n??  No insurance companies found\n'));
     console.log(chalk.gray('Create an insurer agent first\n'));
     return;
   }
 
-  if (patientsWithBills.length === 0) {
-    console.log(chalk.yellow('\n⚠️  No patients with medical bills found\n'));
-    console.log(chalk.gray('Issue a medical bill first\n'));
+  if (patients.length === 0) {
+    console.log(chalk.yellow('\n??  No patients found\n'));
+    console.log(chalk.gray('Create a patient agent first\n'));
     return;
   }
 
-  console.log(chalk.yellow.bold('\n💳 Insurance Verifies & Processes Payment\n'));
+  console.log(chalk.yellow.bold('\n?? Insurance Issues Insurance Policy\n'));
 
   const answers = await inquirer.prompt([
     {
@@ -540,100 +436,70 @@ async function insuranceVerifyAndPay() {
       type: 'list',
       name: 'patient',
       message: 'Select patient:',
-      choices: patientsWithBills.map(p => ({
-        name: `${AGENT_TYPES.patient.icon}  ${p.name} (${p.credentials.filter(c => c.type === 'MedicalBill').length} bill(s))`,
+      choices: patients.map(p => ({
+        name: `${AGENT_TYPES.patient.icon}  ${p.name}`,
         value: p.id
       }))
-    }
-  ]);
-
-  const patient = agentManager.getAgent(answers.patient);
-  const bills = patient.credentials.filter(c => c.type === 'MedicalBill' && c.status === 'active');
-
-  if (bills.length === 0) {
-    console.log(chalk.yellow('\n⚠️  No active bills found for this patient\n'));
-    return;
-  }
-
-  const billAnswer = await inquirer.prompt([
+    },
     {
-      type: 'list',
-      name: 'billIndex',
-      message: 'Select bill to verify:',
-      choices: bills.map((bill, idx) => {
-        const claims = bill.credential.credentialSubject;
-        return {
-          name: `Bill ${claims.billNumber} - ${claims.amount} - ${claims.diagnosis}`,
-          value: patient.credentials.indexOf(bill)
-        };
-      })
+      type: 'input',
+      name: 'policyNumber',
+      message: 'Policy Number:',
+      default: `POL-${Date.now()}`
+    },
+    {
+      type: 'input',
+      name: 'coverage',
+      message: 'Coverage Amount ($):',
+      validate: input => !isNaN(parseFloat(input)) && parseFloat(input) > 0 ? true : 'Enter valid amount'
+    },
+    {
+      type: 'input',
+      name: 'validUntil',
+      message: 'Policy Valid Until (YYYY-MM-DD):',
+      default: new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toISOString().split('T')[0]
+    },
+    {
+      type: 'input',
+      name: 'planType',
+      message: 'Plan Type:',
+      default: 'Standard'
+    },
+    {
+      type: 'input',
+      name: 'deductible',
+      message: 'Deductible Amount ($):',
+      validate: input => !isNaN(parseFloat(input)) && parseFloat(input) >= 0 ? true : 'Enter valid amount'
     }
   ]);
 
-  const selectedBill = patient.credentials[billAnswer.billIndex];
-
-  // Verify the credential
-  console.log(chalk.cyan('\n🔍 Verifying medical bill credential...\n'));
-  
-  try {
-    const isValid = await agentManager.verifyCredential(answers.insurer, selectedBill.credential);
-
-    if (isValid) {
-      console.log(chalk.green('✅ Bill verified successfully!\n'));
-
-      // Get payment details
-      const paymentAnswers = await inquirer.prompt([
-        {
-          type: 'input',
-          name: 'claimNumber',
-          message: 'Insurance Claim Number:',
-          default: `CLM-${Date.now()}`
-        },
-        {
-          type: 'input',
-          name: 'approvedAmount',
-          message: 'Approved Amount ($):',
-          validate: input => !isNaN(parseFloat(input)) && parseFloat(input) > 0 ? true : 'Enter valid amount'
-        },
-        {
-          type: 'input',
-          name: 'coverage',
-          message: 'Coverage Percentage:',
-          default: '80',
-          validate: input => !isNaN(parseInt(input)) && parseInt(input) >= 0 && parseInt(input) <= 100 ? true : 'Enter 0-100'
-        }
-      ]);
-
-      // Issue insurance payment credential
-      const paymentData = {
-        type: 'InsurancePayment',
-        claims: {
-          claimNumber: paymentAnswers.claimNumber,
-          originalBillNumber: selectedBill.credential.credentialSubject.billNumber,
-          approvedAmount: `$${parseFloat(paymentAnswers.approvedAmount).toFixed(2)}`,
-          coverage: `${paymentAnswers.coverage}%`,
-          patientName: selectedBill.credential.credentialSubject.patientName,
-          paymentDate: new Date().toISOString(),
-          status: 'Approved'
-        }
-      };
-
-      const paymentCredential = await agentManager.issueCredential(
-        answers.insurer,
-        answers.patient,
-        paymentData
-      );
-
-      console.log(chalk.green('\n✅ Insurance payment processed successfully!'));
-      console.log(chalk.cyan(`Claim Number: ${paymentAnswers.claimNumber}`));
-      console.log(chalk.cyan(`Approved Amount: $${parseFloat(paymentAnswers.approvedAmount).toFixed(2)}`));
-      console.log(chalk.gray('Payment credential stored on blockchain\n'));
+  const policyData = {
+    type: 'HealthInsurance',
+    claims: {
+      policyNumber: answers.policyNumber,
+      coverage: `${parseFloat(answers.coverage).toFixed(2)}`,
+      validUntil: answers.validUntil,
+      planType: answers.planType,
+      deductible: `${parseFloat(answers.deductible).toFixed(2)}`
     }
+  };
+
+  try {
+    await agentManager.issueCredential(
+      answers.insurer,
+      answers.patient,
+      policyData
+    );
+
+    console.log(chalk.green('\n? Insurance policy document issued successfully!'));
+    console.log(chalk.cyan(`Policy Number: ${answers.policyNumber}`));
+    console.log(chalk.cyan(`Coverage: ${parseFloat(answers.coverage).toFixed(2)}`));
+    console.log(chalk.cyan(`Valid Until: ${answers.validUntil}`));
+    console.log(chalk.gray('Policy credential stored on blockchain and in patient wallet for ZKP presentation\n'));
   } catch (error) {
-    console.log(chalk.red(`❌ Error: ${error.message}\n`));
+    console.log(chalk.red(`? Error: ${error.message}\n`));
   }
 }
-
 // Issue custom credential
 async function issueCredential() {
   const agents = agentManager.listAgents();
@@ -935,69 +801,6 @@ async function exportAgentWallet() {
   }
 }
 
-// Deploy contract
-async function deployContract() {
-  console.log(chalk.yellow.bold('\n⛓️  Deploy Smart Contract\n'));
-
-  const agents = agentManager.listAgents();
-
-  if (agents.length === 0) {
-    console.log(chalk.yellow('⚠️  Create an agent first to use as deployer\n'));
-    return;
-  }
-
-  const answer = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'deployer',
-      message: 'Select deployer agent:',
-      choices: agents.map(a => ({
-        name: `${a.name} (${a.blockchainAddress || 'No wallet'})`,
-        value: a.id
-      }))
-    },
-    {
-      type: 'confirm',
-      name: 'confirm',
-      message: 'Deploy contract to blockchain? This may cost gas.',
-      default: true
-    }
-  ]);
-
-  if (answer.confirm) {
-    try {
-      const result = await agentManager.deployContract(answer.deployer);
-      console.log(chalk.green(`\n✅ Contract deployed at: ${result.address}\n`));
-    } catch (error) {
-      console.log(chalk.red(`❌ Deployment failed: ${error.message}\n`));
-    }
-  }
-}
-
-// Connect to existing contract
-async function connectToContract() {
-  console.log(chalk.yellow.bold('\n🔗 Connect to Existing Contract\n'));
-
-  const answer = await inquirer.prompt([
-    {
-      type: 'input',
-      name: 'address',
-      message: 'Enter contract address:',
-      validate: (input) => input.startsWith('0x') && input.length === 42 ? true : 'Invalid address'
-    }
-  ]);
-
-  try {
-    const agents = agentManager.listAgents();
-    if (agents.length > 0) {
-      await agentManager.connectToContract(answer.address, agents[0].id);
-      console.log(chalk.green('\n✅ Connected to contract\n'));
-    }
-  } catch (error) {
-    console.log(chalk.red(`❌ Connection failed: ${error.message}\n`));
-  }
-}
-
 // Check balances
 async function checkBalances() {
   const agents = agentManager.listAgents();
@@ -1038,6 +841,23 @@ async function checkBalances() {
   }
 
   console.log(table.toString());
+
+  // Show funder wallet balance
+  if (agentManager.blockchain?.funderWallet) {
+    try {
+      const funderInfo = await agentManager.blockchain.getFunderInfo();
+      if (funderInfo.initialized) {
+        console.log(chalk.magenta.bold('\n💳 Funder Wallet'));
+        console.log(chalk.gray(`   Address: ${funderInfo.address}`));
+        console.log(chalk.gray(`   Balance: ${funderInfo.balance} ETH`));
+        if (parseFloat(funderInfo.balance) < 0.01) {
+          console.log(chalk.yellow(`   ⚠️  Low! Fund at https://sepoliafaucet.com/`));
+        }
+      }
+    } catch {
+      // Not critical
+    }
+  }
   console.log('');
 }
 
@@ -1060,7 +880,8 @@ async function showBlockchainInfo() {
     table.push(
       ['Network', chalk.cyan(agentManager.network)],
       ['Contract Address', config.contractAddress ? chalk.green(config.contractAddress) : chalk.red('Not deployed')],
-      ['Deployed At', config.deployedAt || 'N/A']
+      ['Deployed At', config.deployedAt || 'N/A'],
+      ['ZKP Module', agentManager.zkp ? chalk.green('Active') : chalk.yellow('Not initialized')]
     );
 
     if (agentManager.blockchain.contract) {
@@ -1097,7 +918,8 @@ function viewStatistics() {
     ['Total Agents', chalk.cyan(stats.totalAgents)],
     ['Total Connections', chalk.green(stats.totalConnections)],
     ['Total Credentials', chalk.blue(stats.totalCredentials)],
-    ['Blockchain Network', chalk.yellow(stats.blockchainNetwork)]
+    ['Blockchain Network', chalk.yellow(stats.blockchainNetwork)],
+    ['ZKP Module', agentManager.zkp ? chalk.magenta('Active') : chalk.gray('Inactive')]
   );
 
   console.log(table.toString());
@@ -1119,99 +941,6 @@ function viewStatistics() {
 
     console.log(typeTable.toString());
     console.log('');
-  }
-}
-
-// Healthcare demo
-async function healthcareDemo() {
-  console.log(chalk.cyan.bold('\n🚀 Healthcare Billing Demo\n'));
-  console.log(chalk.white('Creating a complete healthcare billing scenario...\n'));
-
-  await new Promise(resolve => setTimeout(resolve, 1000));
-
-  try {
-    // Create agents
-    console.log(chalk.yellow('Step 1: Creating healthcare ecosystem...'));
-    const hospital = await agentManager.createAgent('City General Hospital', 'hospital', {
-      description: 'Primary healthcare provider'
-    });
-    
-    const patient = await agentManager.createAgent('John Smith', 'patient', {
-      description: 'Patient receiving treatment'
-    });
-    
-    const insurer = await agentManager.createAgent('HealthCare Plus Insurance', 'insurer', {
-      description: 'Health insurance provider'
-    });
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Connect agents
-    console.log(chalk.yellow('\nStep 2: Establishing connections...'));
-    await agentManager.connectAgents(hospital.id, patient.id);
-    await agentManager.connectAgents(patient.id, insurer.id);
-    await agentManager.connectAgents(hospital.id, insurer.id);
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Issue medical bill
-    console.log(chalk.yellow('\nStep 3: Hospital issues medical bill...'));
-    const billCred = await agentManager.issueCredential(
-      hospital.id,
-      patient.id,
-      {
-        type: 'MedicalBill',
-        claims: {
-          billNumber: 'BILL-2024-001',
-          patientName: 'John Smith',
-          diagnosis: 'Appendicitis',
-          treatment: 'Appendectomy Surgery',
-          amount: '$15,000.00',
-          date: '2024-01-15',
-          issuedDate: new Date().toISOString()
-        }
-      }
-    );
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Verify bill
-    console.log(chalk.yellow('\nStep 4: Verifying medical bill...'));
-    await agentManager.verifyCredential(patient.id, billCred);
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    // Issue insurance payment
-    console.log(chalk.yellow('\nStep 5: Insurance processes claim...'));
-    const paymentCred = await agentManager.issueCredential(
-      insurer.id,
-      patient.id,
-      {
-        type: 'InsurancePayment',
-        claims: {
-          claimNumber: 'CLM-2024-789',
-          originalBillNumber: 'BILL-2024-001',
-          approvedAmount: '$12,000.00',
-          coverage: '80%',
-          patientName: 'John Smith',
-          paymentDate: new Date().toISOString(),
-          status: 'Approved'
-        }
-      }
-    );
-
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    console.log(chalk.green.bold('\n✅ Healthcare Demo Completed!\n'));
-    console.log(chalk.white('Successfully demonstrated:'));
-    console.log(chalk.cyan('  ✓ Created 3 healthcare agents'));
-    console.log(chalk.cyan('  ✓ Established trust connections'));
-    console.log(chalk.cyan('  ✓ Issued medical bill credential'));
-    console.log(chalk.cyan('  ✓ Verified bill on blockchain'));
-    console.log(chalk.cyan('  ✓ Processed insurance payment'));
-    console.log('');
-  } catch (error) {
-    console.log(chalk.red(`❌ Demo failed: ${error.message}\n`));
   }
 }
 
@@ -1253,7 +982,7 @@ async function cleanData() {
 async function main() {
   displayBanner();
   
-  // Initialize blockchain
+  // Initialize blockchain (this also initializes ZKP module now)
   try {
     await agentManager.initializeBlockchain();
     console.log(chalk.green('✅ Blockchain initialized\n'));
@@ -1293,20 +1022,11 @@ async function main() {
         case 'delete':
           await deleteAgent();
           break;
-        case 'connect':
-          await connectAgents();
-          break;
-        case 'disconnect':
-          await disconnectAgents();
-          break;
         case 'issue-bill':
           await hospitalIssueBill();
           break;
-        case 'verify-pay':
-          await insuranceVerifyAndPay();
-          break;
-        case 'issue':
-          await issueCredential();
+        case 'issue-policy':
+          await insuranceIssuePolicy();
           break;
         case 'verify':
           await verifyCredential();
@@ -1317,20 +1037,11 @@ async function main() {
         case 'export':
           await exportAgentWallet();
           break;
-        case 'deploy-contract':
-          await deployContract();
-          break;
-        case 'connect-contract':
-          await connectToContract();
-          break;
         case 'balances':
           await checkBalances();
           break;
         case 'blockchain-info':
           await showBlockchainInfo();
-          break;
-        case 'demo':
-          await healthcareDemo();
           break;
         case 'clean':
           await cleanData();
@@ -1338,6 +1049,15 @@ async function main() {
         case 'exit':
           console.log(chalk.cyan.bold('\n👋 Thank you for using SSI Healthcare System!\n'));
           running = false;
+          break;
+        // ZKP actions — delegated to zkpMenu.js handler
+        case 'zkp-generate':
+        case 'zkp-submit':
+        case 'zkp-verify':
+        case 'zkp-list':
+        case 'zkp-received':
+        case 'zkp-range':
+          await handleZKPAction(action, agentManager);
           break;
       }
     } catch (error) {
@@ -1365,3 +1085,7 @@ main().catch(error => {
   console.error(error.stack);
   process.exit(1);
 });
+
+
+
+

@@ -213,7 +213,8 @@ export const AGENT_TYPES = {
     color: 'green',
     icon: '👤',
     canIssue: [], // Patients CANNOT issue any credentials
-    description: 'Individual receiving healthcare services - cannot issue credentials'
+    canGenerateProofs: true, // Patients CAN generate ZK proofs
+    description: 'Individual receiving healthcare services - cannot issue credentials, can generate ZK proofs'
   },
   
   insurer: {
@@ -221,7 +222,9 @@ export const AGENT_TYPES = {
     color: 'blue',
     icon: '🏢',
     canIssue: ['HealthInsurance', 'InsurancePayment'], // ONLY these
-    description: 'Insurance provider - can issue insurance policies and payment credentials'
+    canVerifyProofs: true, // Insurers CAN verify ZK proofs
+    canRequestProofs: true, // Insurers CAN request proofs from patients
+    description: 'Insurance provider - can issue insurance policies, verify ZK proofs, and request proofs'
   }
 };
 
@@ -242,6 +245,109 @@ export function canIssueCredential(agentType, credentialType) {
     throw new Error(
       `❌ PERMISSION DENIED: Only ${allowedTypes} can issue ${credentialType} credentials. ` +
       `${AGENT_TYPES[agentType]?.label || agentType} cannot issue this type.`
+    );
+  }
+  
+  return true;
+}
+
+// ======================================================
+// ZKP PROOF REQUEST SCHEMAS
+// ======================================================
+// These define what proofs an insurer can request from a patient.
+// Each schema specifies which credential type it applies to,
+// and which fields are typically disclosed vs hidden.
+
+export const PROOF_REQUEST_SCHEMAS = {
+  // Insurance claim verification - prove treatment happened without full details
+  InsuranceClaimProof: {
+    type: 'InsuranceClaimProof',
+    appliesToCredential: 'MedicalBill',
+    requesterRestriction: ['insurer'],
+    // Fields the insurer NEEDS to see (patient can still refuse)
+    suggestedDisclosure: ['billNumber', 'patientName', 'amount', 'date'],
+    // Fields that should stay hidden via ZKP
+    typicallyHidden: ['diagnosis', 'treatment', 'doctorName'],
+    description: 'Prove a medical bill exists and its amount, without revealing diagnosis/treatment details'
+  },
+
+  // Vaccination proof - prove vaccinated without revealing batch/doctor
+  VaccinationProof: {
+    type: 'VaccinationProof',
+    appliesToCredential: 'VaccinationRecord',
+    requesterRestriction: ['insurer'],
+    suggestedDisclosure: ['vaccine', 'date', 'dose'],
+    typicallyHidden: ['batchNumber', 'administeredBy'],
+    description: 'Prove vaccination status without revealing batch number or provider'
+  },
+
+  // Medical condition proof - prove condition exists without full record
+  MedicalConditionProof: {
+    type: 'MedicalConditionProof',
+    appliesToCredential: 'MedicalRecord',
+    requesterRestriction: ['insurer'],
+    suggestedDisclosure: ['recordType', 'date'],
+    typicallyHidden: ['diagnosis', 'treatment', 'doctorName'],
+    description: 'Prove a medical record exists without revealing diagnosis or treatment'
+  },
+
+  // Amount range proof - prove bill is within a range
+  BillAmountRangeProof: {
+    type: 'BillAmountRangeProof',
+    appliesToCredential: 'MedicalBill',
+    requesterRestriction: ['insurer'],
+    proofType: 'range',
+    field: 'amount',
+    description: 'Prove bill amount is within a specified range without revealing exact amount'
+  }
+};
+
+// Validate if an agent type can generate ZK proofs
+export function canGenerateProof(agentType) {
+  const agentConfig = AGENT_TYPES[agentType];
+  if (!agentConfig) {
+    throw new Error(`Unknown agent type: ${agentType}`);
+  }
+  
+  if (!agentConfig.canGenerateProofs) {
+    throw new Error(
+      `❌ PERMISSION DENIED: ${agentConfig.label} cannot generate ZK proofs. ` +
+      `Only Patients can generate proofs from their credentials.`
+    );
+  }
+  
+  return true;
+}
+
+// Validate if an agent type can verify ZK proofs
+export function canVerifyProof(agentType) {
+  const agentConfig = AGENT_TYPES[agentType];
+  if (!agentConfig) {
+    throw new Error(`Unknown agent type: ${agentType}`);
+  }
+  
+  if (!agentConfig.canVerifyProofs) {
+    throw new Error(
+      `❌ PERMISSION DENIED: ${agentConfig.label} cannot verify ZK proofs. ` +
+      `Only Insurance Companies can verify proofs.`
+    );
+  }
+  
+  return true;
+}
+
+// Validate if an agent type can request proofs
+export function canRequestProof(agentType, proofType) {
+  const schema = PROOF_REQUEST_SCHEMAS[proofType];
+  if (!schema) {
+    throw new Error(`Unknown proof request type: ${proofType}`);
+  }
+  
+  if (schema.requesterRestriction && !schema.requesterRestriction.includes(agentType)) {
+    const allowed = schema.requesterRestriction.map(t => AGENT_TYPES[t]?.label || t).join(', ');
+    throw new Error(
+      `❌ PERMISSION DENIED: Only ${allowed} can request ${proofType}. ` +
+      `${AGENT_TYPES[agentType]?.label || agentType} cannot request this proof type.`
     );
   }
   
