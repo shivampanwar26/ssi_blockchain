@@ -47,8 +47,9 @@ async function mainMenu() {
     
     new inquirer.Separator(chalk.cyan('═══ CREDENTIALS & BILLING ═══')),
     { name: '🏥  Hospital Issues Bill', value: 'issue-bill' },
-    { name: '??  Insurance Issues Insurance Policy', value: 'issue-policy' },
-    { name: '??  Verify Credential (Issuer-only test)', value: 'verify' },
+    { name: '💳  Insurance Verifies & Pays', value: 'verify-pay' },
+    { name: '📄  Issue Custom Credential', value: 'issue' },
+    { name: '🔍  Verify Credential', value: 'verify' },
     { name: '🚫  Revoke Credential', value: 'revoke' },
     { name: '📤  Export Agent Wallet', value: 'export' },
     
@@ -396,31 +397,49 @@ async function hospitalIssueBill() {
     console.log(chalk.green('\n✅ Medical bill issued successfully!'));
     console.log(chalk.cyan(`Bill Number: ${answers.billNumber}`));
     console.log(chalk.cyan(`Amount: $${parseFloat(answers.amount).toFixed(2)}`));
-    console.log(chalk.gray('Bill stored on blockchain and in patient wallet for ZKP presentation\n'));
+    console.log(chalk.gray('Bill stored on blockchain and in patient wallet\n'));
+
+    // Ask if they want to process insurance now
+    const processNow = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'process',
+        message: 'Would you like to process insurance verification now?',
+        default: true
+      }
+    ]);
+
+    if (processNow.process) {
+      await insuranceVerifyAndPay();
+    }
   } catch (error) {
     console.log(chalk.red(`❌ Error issuing bill: ${error.message}\n`));
   }
 }
 
-// Insurance company issues insurance policy
-async function insuranceIssuePolicy() {
+// Insurance verifies and pays
+async function insuranceVerifyAndPay() {
   const agents = agentManager.listAgents();
   const insurers = agents.filter(a => a.type === 'insurer');
-  const patients = agents.filter(a => a.type === 'patient');
+  const patientsWithBills = agents.filter(a => 
+    a.type === 'patient' && 
+    a.credentials && 
+    a.credentials.some(c => c.type === 'MedicalBill')
+  );
 
   if (insurers.length === 0) {
-    console.log(chalk.yellow('\n??  No insurance companies found\n'));
+    console.log(chalk.yellow('\n⚠️  No insurance companies found\n'));
     console.log(chalk.gray('Create an insurer agent first\n'));
     return;
   }
 
-  if (patients.length === 0) {
-    console.log(chalk.yellow('\n??  No patients found\n'));
-    console.log(chalk.gray('Create a patient agent first\n'));
+  if (patientsWithBills.length === 0) {
+    console.log(chalk.yellow('\n⚠️  No patients with medical bills found\n'));
+    console.log(chalk.gray('Issue a medical bill first\n'));
     return;
   }
 
-  console.log(chalk.yellow.bold('\n?? Insurance Issues Insurance Policy\n'));
+  console.log(chalk.yellow.bold('\n💳 Insurance Verifies & Processes Payment\n'));
 
   const answers = await inquirer.prompt([
     {
@@ -436,70 +455,100 @@ async function insuranceIssuePolicy() {
       type: 'list',
       name: 'patient',
       message: 'Select patient:',
-      choices: patients.map(p => ({
-        name: `${AGENT_TYPES.patient.icon}  ${p.name}`,
+      choices: patientsWithBills.map(p => ({
+        name: `${AGENT_TYPES.patient.icon}  ${p.name} (${p.credentials.filter(c => c.type === 'MedicalBill').length} bill(s))`,
         value: p.id
       }))
-    },
-    {
-      type: 'input',
-      name: 'policyNumber',
-      message: 'Policy Number:',
-      default: `POL-${Date.now()}`
-    },
-    {
-      type: 'input',
-      name: 'coverage',
-      message: 'Coverage Amount ($):',
-      validate: input => !isNaN(parseFloat(input)) && parseFloat(input) > 0 ? true : 'Enter valid amount'
-    },
-    {
-      type: 'input',
-      name: 'validUntil',
-      message: 'Policy Valid Until (YYYY-MM-DD):',
-      default: new Date(new Date().setFullYear(new Date().getFullYear() + 1)).toISOString().split('T')[0]
-    },
-    {
-      type: 'input',
-      name: 'planType',
-      message: 'Plan Type:',
-      default: 'Standard'
-    },
-    {
-      type: 'input',
-      name: 'deductible',
-      message: 'Deductible Amount ($):',
-      validate: input => !isNaN(parseFloat(input)) && parseFloat(input) >= 0 ? true : 'Enter valid amount'
     }
   ]);
 
-  const policyData = {
-    type: 'HealthInsurance',
-    claims: {
-      policyNumber: answers.policyNumber,
-      coverage: `${parseFloat(answers.coverage).toFixed(2)}`,
-      validUntil: answers.validUntil,
-      planType: answers.planType,
-      deductible: `${parseFloat(answers.deductible).toFixed(2)}`
+  const patient = agentManager.getAgent(answers.patient);
+  const bills = patient.credentials.filter(c => c.type === 'MedicalBill' && c.status === 'active');
+
+  if (bills.length === 0) {
+    console.log(chalk.yellow('\n⚠️  No active bills found for this patient\n'));
+    return;
+  }
+
+  const billAnswer = await inquirer.prompt([
+    {
+      type: 'list',
+      name: 'billIndex',
+      message: 'Select bill to verify:',
+      choices: bills.map((bill, idx) => {
+        const claims = bill.credential.credentialSubject;
+        return {
+          name: `Bill ${claims.billNumber} - ${claims.amount} - ${claims.diagnosis}`,
+          value: patient.credentials.indexOf(bill)
+        };
+      })
     }
-  };
+  ]);
 
+  const selectedBill = patient.credentials[billAnswer.billIndex];
+
+  // Verify the credential
+  console.log(chalk.cyan('\n🔍 Verifying medical bill credential...\n'));
+  
   try {
-    await agentManager.issueCredential(
-      answers.insurer,
-      answers.patient,
-      policyData
-    );
+    const isValid = await agentManager.verifyCredential(answers.insurer, selectedBill.credential);
 
-    console.log(chalk.green('\n? Insurance policy document issued successfully!'));
-    console.log(chalk.cyan(`Policy Number: ${answers.policyNumber}`));
-    console.log(chalk.cyan(`Coverage: ${parseFloat(answers.coverage).toFixed(2)}`));
-    console.log(chalk.cyan(`Valid Until: ${answers.validUntil}`));
-    console.log(chalk.gray('Policy credential stored on blockchain and in patient wallet for ZKP presentation\n'));
+    if (isValid) {
+      console.log(chalk.green('✅ Bill verified successfully!\n'));
+
+      // Get payment details
+      const paymentAnswers = await inquirer.prompt([
+        {
+          type: 'input',
+          name: 'claimNumber',
+          message: 'Insurance Claim Number:',
+          default: `CLM-${Date.now()}`
+        },
+        {
+          type: 'input',
+          name: 'approvedAmount',
+          message: 'Approved Amount ($):',
+          validate: input => !isNaN(parseFloat(input)) && parseFloat(input) > 0 ? true : 'Enter valid amount'
+        },
+        {
+          type: 'input',
+          name: 'coverage',
+          message: 'Coverage Percentage:',
+          default: '80',
+          validate: input => !isNaN(parseInt(input)) && parseInt(input) >= 0 && parseInt(input) <= 100 ? true : 'Enter 0-100'
+        }
+      ]);
+
+      // Issue insurance payment credential
+      const paymentData = {
+        type: 'InsurancePayment',
+        claims: {
+          claimNumber: paymentAnswers.claimNumber,
+          originalBillNumber: selectedBill.credential.credentialSubject.billNumber,
+          approvedAmount: `$${parseFloat(paymentAnswers.approvedAmount).toFixed(2)}`,
+          coverage: `${paymentAnswers.coverage}%`,
+          patientName: selectedBill.credential.credentialSubject.patientName,
+          paymentDate: new Date().toISOString(),
+          status: 'Approved'
+        }
+      };
+
+      const paymentCredential = await agentManager.issueCredential(
+        answers.insurer,
+        answers.patient,
+        paymentData
+      );
+
+      console.log(chalk.green('\n✅ Insurance payment processed successfully!'));
+      console.log(chalk.cyan(`Claim Number: ${paymentAnswers.claimNumber}`));
+      console.log(chalk.cyan(`Approved Amount: $${parseFloat(paymentAnswers.approvedAmount).toFixed(2)}`));
+      console.log(chalk.gray('Payment credential stored on blockchain\n'));
+    }
   } catch (error) {
-    console.log(chalk.red(`? Error: ${error.message}\n`));
+    console.log(chalk.red(`❌ Error: ${error.message}\n`));
   }
 }
+
 // Issue custom credential
 async function issueCredential() {
   const agents = agentManager.listAgents();
@@ -1025,8 +1074,11 @@ async function main() {
         case 'issue-bill':
           await hospitalIssueBill();
           break;
-        case 'issue-policy':
-          await insuranceIssuePolicy();
+        case 'verify-pay':
+          await insuranceVerifyAndPay();
+          break;
+        case 'issue':
+          await issueCredential();
           break;
         case 'verify':
           await verifyCredential();
@@ -1085,7 +1137,3 @@ main().catch(error => {
   console.error(error.stack);
   process.exit(1);
 });
-
-
-
-
